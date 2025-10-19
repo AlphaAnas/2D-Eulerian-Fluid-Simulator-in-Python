@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<head>
+	<title>Euler Fluid</title>
+	<style>
+		body {
+			font-family: verdana;
+			font-size: 15px;
+		}
+
+		.button {
+			background-color: #606060;
+			border: none;
+			color: white;
+			padding: 10px 10px;
+			font-size: 16px;
+			margin: 4px 2px;
+			cursor: pointer;
+		}
+
+		.slider {
+			-webkit-appearance: none;
+			width: 80px;
+			height: 6px;
+			border-radius: 5px;
+			background: #d3d3d3;
+			outline: none;
+			opacity: 0.7;
+			-webkit-transition: .2s;
+			transition: opacity .2s;
+		}
+	</style>
+</head>
+
+<body>
+
+	<button class="button" onclick="setupScene(1)">Wind Tunnel</button>
+	<button class="button" onclick="setupScene(3)">Hires Tunnel</button>
+	<button class="button" onclick="setupScene(0)">Tank</button>
+	<button class="button" onclick="setupScene(2)">Paint</button>
+	<input type="checkbox" id="streamButton" onclick="scene.showStreamlines = !scene.showStreamlines">Streamlines
+	<input type="checkbox" id="velocityButton" onclick="scene.showVelocities = !scene.showVelocities">Velocities
+	<input type="checkbox" name="field" id="pressureButton" onclick="scene.showPressure = !scene.showPressure;">
+	Pressure
+	<input type="checkbox" name="field" id="smokeButton" onclick="scene.showSmoke = !scene.showSmoke;" checked>Smoke
+	<input type="checkbox" id="overrelaxButton" onclick="scene.overRelaxation = scene.overRelaxation == 1.0 ? 1.9 : 1.0"
+		checked>Overrelax
+	<br>
+	<canvas id="myCanvas" style="border:2px solid"></canvas>
+
+
+	<script>
+
+		var canvas = document.getElementById("myCanvas");
+		var c = canvas.getContext("2d");
+		canvas.width = window.innerWidth - 20;
+		canvas.height = window.innerHeight - 100;
+
+		canvas.focus();
+
+		var simHeight = 1.1;
+		var cScale = canvas.height / simHeight;
+		var simWidth = canvas.width / cScale;
+
+		var U_FIELD = 0;
+		var V_FIELD = 1;
+		var S_FIELD = 2;
+
+		var cnt = 0;
+
+		function cX(x) {
+			return x * cScale;
+		}
+
+		function cY(y) {
+			return canvas.height - y * cScale;
+		}
+
+		// ----------------- start of simulator ------------------------------
+
+		class Fluid {
+			constructor(density, numX, numY, h) {
+				this.density = density;
+				this.numX = numX + 2;
+				this.numY = numY + 2;
+				this.h = h;
+				this.numCells = this.numX * this.numY;
+				this.u = new Float32Array(this.numCells); // x-velocity
+				this.v = new Float32Array(this.numCells); // y-velocity
+				this.newU = new Float32Array(this.numCells);
+				this.newV = new Float32Array(this.numCells);
+				this.p = new Float32Array(this.numCells); // pressure
+				this.s = new Float32Array(this.numCells); // smoke density
+				this.m = new Float32Array(this.numCells); // marker field
+				this.newM = new Float32Array(this.numCells);
+				this.m.fill(1.0); // initialize as fluid
+				var num = numX * numY; // number of fluid cells
+
+			}
+
+			integrate(dt, gravity) {
+				var n = this.numY;
+				for (var i = 1; i < this.numX; i++) {
+					for (var j = 1; j < this.numY - 1; j++) {
+						if (this.s[i * n + j] != 0.0 && this.s[i * n + j - 1] != 0.0) { // if there is smoke here and below
+							this.v[i * n + j] += gravity * dt; // apply gravity
+						}
+					}
+				}
+			}
+
+			/**
+			 * Enforce incompressibility of the velocity field by solving the pressure Poisson equation
+			 * and projecting the velocity to be divergence-free.
+			 *
+			 * This function performs an iterative pressure solve (e.g., Gauss–Seidel/Jacobi style)
+			 * for the specified number of iterations to approximate the pressure field that removes
+			 * divergence from the velocity field. After (or during) the solve it subtracts the pressure
+			 * gradient (appropriately scaled by dt and grid spacing) from the velocity to produce a
+			 * divergence-free velocity field. Boundary conditions for pressure and velocity are applied
+			 * as part of the procedure. The operation updates the simulator's internal velocity and
+			 * pressure arrays in-place to enforce mass conservation.
+			 *
+			 * @param {number} numIters - Number of iterations to run the linear solver. More iterations
+			 *                             yield a more accurate projection at higher computational cost.
+			 * @param {number} dt       - Simulation time step (seconds). Used to scale pressure-gradient
+			 *                             corrections when projecting velocities and can affect solver scaling.
+			 * @returns {void}          - No return value; modifies simulation state (pressure/velocity) in-place.
+			 */
+			solveIncompressibility(numIters, dt) {
+
+				var n = this.numY;
+				// cp = (rho * cellVolume) / dt, used to scale the discrete divergence into the pressure RHS
+				var cp = this.density * this.j / dt;
+
+
+				for (var iter = 0; iter < numIters; iter++) {
+					for (var i = 1; i < this.numX - 1; i++) { // iterating till the 2nd last cell because of boundary conditions
+						for (var j = 1; j < this.numY - 1; j++) {
+
+
+							if (this.s[i * n + j] == 0.0)
+								continue; // skip if not fluid cell
+
+
+
+							// 🔑 The Solution: i*n + j
+							// This formula converts 2D coordinates (i, j) into a 1D array index.
+
+							// What the Variables Mean:
+							// i = row number (which row down)
+							// j = column number (which column across)
+							// n = this.numY = number of rows (grid height)
+							// 📐 The Formula Breakdown:
+							// How It Works:
+							// i*n = Skip past all the complete rows before row i
+							// + j = Move j positions to the right in the current row
+
+							var s = this.s[i * n + j]; // smoke density at current cell where n is 
+
+							var sx0 = this.s[(i - 1) * n + j]; // left
+							var sx1 = this.s[(i + 1) * n + j]; // right
+							var sy0 = this.s[i * n + (j - 1)]; // down
+							var sy1 = this.s[i * n + (j + 1)]; // up
+							var s = sx0 + sx1 + sy0 + sy1; // overwrite s to be sum of neighbors
+							if (s == 0.0)
+								continue; // skip if no fluid neighbors
+
+
+							var div = this.u[(i + 1) * n + j] - this.u[i * n + j] +
+								this.v[i * n + (j + 1)] - this.v[i * n + j];  // fluid coming in minus fluid going out on all sides
+
+							var p = -div / s;  // pressure is scaled negative divergence
+
+
+							p *= scene.overRelaxation; // over-relaxation factor
+							this.p[i * n + j] += p * cp; // accumulate pressure
+
+
+
+							// update velocities based on pressure gradient
+							this.u[i * n + j] -= sx0 * p;  // reduce the velocity going into the cell
+							this.u[(i + 1) * n + j] += sx1 * p; // increase the velocity coming out of the cell
+							this.v[i * n + j] -= sy0 * p; // reduce the velocity going into the cell from below
+							this.v[i * n + (j + 1)] += sy1 * p; // increase the velocity coming out of the cell above
+						}
+					}
+				}
+			}
+
+			extrapolate(){
+				var n = this.numY;
+				for (var i = 0; i < this.numX; i++){
+					this.u[i*n + 0] = this.u[i*n + 1];
+					
+				}
+			}
+		}

@@ -195,7 +195,9 @@
 								continue; // skip if not fluid cell
 
 
-
+							// ───────────────────────────────────────────────────────
+							// CHECK NEIGHBOR CELLS - Count how many are fluid
+							// ───────────────────────────────────────────────────────
 							// 🔑 The Solution: i*n + j
 							// This formula converts 2D coordinates (i, j) into a 1D array index.
 
@@ -208,56 +210,77 @@
 							// i*n = Skip past all the complete rows before row i
 							// + j = Move j positions to the right in the current row
 
-							var s = this.s[i * n + j]; // smoke density at current cell where n is 
+							var s = this.s[i * n + j]; // Current cell (will be overwritten below)
 
-							var sx0 = this.s[(i - 1) * n + j]; // left
-							var sx1 = this.s[(i + 1) * n + j]; // right
-							var sy0 = this.s[i * n + (j - 1)]; // down
-							var sy1 = this.s[i * n + (j + 1)]; // up
-							var s = sx0 + sx1 + sy0 + sy1; // overwrite s to be sum of neighbors
+							var sx0 = this.s[(i - 1) * n + j]; // left neighbor (0=solid, 1=fluid)
+							var sx1 = this.s[(i + 1) * n + j]; // right neighbor
+							var sy0 = this.s[i * n + (j - 1)]; // down neighbor (bottom)
+							var sy1 = this.s[i * n + (j + 1)]; // up neighbor (top)
+							var s = sx0 + sx1 + sy0 + sy1; // overwrite s to be sum of neighbors (count fluid neighbors)
 							if (s == 0.0)
-								continue; // skip if no fluid neighbors
+								continue; // skip if no fluid neighbors (completely surrounded by walls)
 
-
+							// ───────────────────────────────────────────────────────
+							// CALCULATE DIVERGENCE - Measure compression/expansion
+							// ───────────────────────────────────────────────────────
+							// Divergence = (flow OUT) - (flow IN)
+							// Positive divergence = too much fluid coming in (compressed)
+							// Negative divergence = too much fluid going out (stretched)
 							var div = this.u[(i + 1) * n + j] - this.u[i * n + j] +
 								this.v[i * n + (j + 1)] - this.v[i * n + j];  // fluid coming in minus fluid going out on all sides
 
-							var p = -div / s;  // pressure is scaled negative divergence
+							// ───────────────────────────────────────────────────────
+							// COMPUTE PRESSURE CORRECTION
+							// ───────────────────────────────────────────────────────
+							var p = -div / s;  // pressure is scaled negative divergence (negative to push fluid OUT of compressed areas)
+
+							// Apply over-relaxation to speed up convergence
+							p *= scene.overRelaxation; // over-relaxation factor (typically 1.9)
+							this.p[i * n + j] += p * cp; // accumulate pressure (cp scales to physical units)
 
 
-							p *= scene.overRelaxation; // over-relaxation factor
-							this.p[i * n + j] += p * cp; // accumulate pressure
-
-
-
+							// ───────────────────────────────────────────────────────
+							// UPDATE VELOCITIES - Apply pressure gradient
+							// ───────────────────────────────────────────────────────
+							// High pressure pushes fluid OUTWARD in all directions
 							// update velocities based on pressure gradient
-							this.u[i * n + j] -= sx0 * p;  // reduce the velocity going into the cell
-							this.u[(i + 1) * n + j] += sx1 * p; // increase the velocity coming out of the cell
-							this.v[i * n + j] -= sy0 * p; // reduce the velocity going into the cell from below
-							this.v[i * n + (j + 1)] += sy1 * p; // increase the velocity coming out of the cell above
+							this.u[i * n + j] -= sx0 * p;  // Reduce flow INTO cell from LEFT
+							this.u[(i + 1) * n + j] += sx1 * p; // Increase flow OUT of cell to RIGHT
+							this.v[i * n + j] -= sy0 * p; // Reduce flow INTO cell from BELOW
+							this.v[i * n + (j + 1)] += sy1 * p; // Increase flow OUT of cell to ABOVE
 						}
 					}
 				}
 			}
 			
-			
-			/*
-				Copies velocity values from inside the grid to the boundary edges.
-
-				Before:          After extrapolate:
-				[?][?][?][?]  →  [5][5][7][3]
-				[5][7][3][2]     [5][7][3][2]
-				[4][6][8][1]     [4][6][8][1]
-			*/
+			/**
+			 * ═══════════════════════════════════════════════════════════════
+			 * STEP 3: EXTRAPOLATE VELOCITIES TO BOUNDARIES
+			 * ═══════════════════════════════════════════════════════════════
+			 * Copies velocity values from inside the grid to the boundary edges.
+			 * This prevents undefined/zero velocities at boundaries which would cause artifacts.
+			 *
+			 * Before:          After extrapolate:
+			 * [?][?][?][?]  →  [5][5][7][3]
+			 * [5][7][3][2]     [5][7][3][2]
+			 * [4][6][8][1]     [4][6][8][1]
+			 */
 			extrapolate(){
 				var n = this.numY;
 			
+				// ───────────────────────────────────────────────────────
+				// Copy horizontal velocities (u) to top and bottom edges
+				// ───────────────────────────────────────────────────────
 				for (var i = 0; i < this.numX; i++){
 					// Bottom edge: copy from row 1 to row 0
 					this.u[i*n + 0] = this.u[i*n + 1];
-
+					// Top edge: copy from second-to-last row to last row
+					this.u[i*n + this.numY-1] = this.u[i*n + this.numY-2];
 				}
 
+				// ───────────────────────────────────────────────────────
+				// Copy vertical velocities (v) to left and right edges
+				// ───────────────────────────────────────────────────────
 				for(var j = 0 ; j < this.numY; j++){
 					// Left edge: copy from column 1 to column 0
 					this.v[0*n + j] = this.v[1*n + j]; 
@@ -266,73 +289,122 @@
 				}
 			}
 
-			/*
-				Gets a smooth value at ANY position (not just grid corners) by blending nearby values.
-			Grid points:     What if we want value HERE? ★
-			[10]----[20]     
-			|       |      			 [10]----[20]
-			|       |        		  |   ★   |
-			[30]----[40]             [30]----[40]
-			
-				*/
+			/**
+			 * ═══════════════════════════════════════════════════════════════
+			 * BILINEAR INTERPOLATION - Get smooth values between grid points
+			 * ═══════════════════════════════════════════════════════════════
+			 * Gets a smooth value at ANY position (not just grid corners) by blending nearby values.
+			 * Grid points:     What if we want value HERE? ★
+			 * [10]----[20]     
+			 * |       |      			 [10]----[20]
+			 * |       |        		  |   ★   |
+			 * [30]----[40]             [30]----[40]
+			 * 
+			 * This uses bilinear interpolation - like mixing 4 paint colors based on distance
+			 * 
+			 * @param {number} x - X position in simulation coordinates
+			 * @param {number} y - Y position in simulation coordinates
+			 * @param {number} field - Which field to sample (U_FIELD, V_FIELD, or S_FIELD)
+			 * @returns {number} - Interpolated value at position (x, y)
+			 */
 			sampleField(x, y, field){
 				var n = this.numY;
-				var h = this.h;
-				var h1 = 1.0 / h; // inverse cell size
-				var h2 = 0.5 * h; // half cell size
+				var h = this.h; // Cell size
+				var h1 = 1.0 / h; // inverse cell size (for efficient division)
+				var h2 = 0.5 * h; // half cell size (for staggered grid offset)
 
-					//1. Clamp position to grid bounds
+				// ───────────────────────────────────────────────────────
+				// 1. Clamp position to grid bounds (prevent out-of-bounds access)
+				// ───────────────────────────────────────────────────────
 				x = Math.max(Math.min(x, this.numX * h ), h); 
 				y = Math.max(Math.min(y, this.numY * h ), h);
 
 
-				var dx = 0.0;
-				var dy = 0.0;
+				var dx = 0.0; // X offset for staggered grid
+				var dy = 0.0; // Y offset for staggered grid
 
-				var f; 
-					//2. Choose which array to sample
+				var f; // Pointer to the array we'll sample from
+				
+				// ───────────────────────────────────────────────────────
+				// 2. Choose which array to sample (different fields stored at different locations)
+				// ───────────────────────────────────────────────────────
 				switch (field){
-						case U_FIELD: f = this.u; dy = h2; break;  // Horizontal velocity
-						case V_FIELD: f = this.v; dx = h2; break;  // Vertical velocity
-						case S_FIELD: f = this.m; dx = h2; dy = h2; break; // Smoke
+						case U_FIELD: f = this.u; dy = h2; break;  // Horizontal velocity (offset vertically)
+						case V_FIELD: f = this.v; dx = h2; break;  // Vertical velocity (offset horizontally)
+						case S_FIELD: f = this.m; dx = h2; dy = h2; break; // Smoke (offset both directions - cell center)
 				}
 
-
-				//3. Find the 4 surrounding grid cells
-				//  x=2.7, then x0=2 and x1=3
-				var x0 = Math.min(Math.floor((x - dx) * h1), this.numX - 1);
-				var x1 = Math.min(x0 + 1, this.numX - 1);
+				// ───────────────────────────────────────────────────────
+				// 3. Find the 4 surrounding grid cells
+				// ───────────────────────────────────────────────────────
+				// Example: if x=2.7, then x0=2 and x1=3
+				var x0 = Math.min(Math.floor((x - dx) * h1), this.numX - 1); // Left cell index
+				var x1 = Math.min(x0 + 1, this.numX - 1); // Right cell index
 				
 				
-				var y0 = Math.min(Math.floor((y - dy) * h1), this.numY - 1);
-				var y1 = Math.min(y0 + 1, this.numY - 1);
+				var y0 = Math.min(Math.floor((y - dy) * h1), this.numY - 1); // Bottom cell index
+				var y1 = Math.min(y0 + 1, this.numY - 1); // Top cell index
 				
-				//4. Calculate blend weights
+				// ───────────────────────────────────────────────────────
+				// 4. Calculate blend weights (how close to each corner?)
+				// ───────────────────────────────────────────────────────
 
 				var tx = ((x - dx) - x0*h) * h1;  // How far right (0 to 1)
 				var ty = ((y - dy) - y0*h) * h1;  // How far up (0 to 1)
 
-				var sx = 1.0 - tx;  // How far left
-				var sy = 1.0 - ty;  // How far down
+				var sx = 1.0 - tx;  // How far left (1 - right weight)
+				var sy = 1.0 - ty;  // How far down (1 - up weight)
 
+				// ───────────────────────────────────────────────────────
+				// 5. Blend the 4 corner values using weighted average
+				// ───────────────────────────────────────────────────────
+				var val = 	sx*sy * f[x0*n + y0] +  // Bottom-left corner weight
+							tx*sy * f[x1*n + y0] +  // Bottom-right corner weight
+							tx*ty * f[x1*n + y1] +  // Top-right corner weight
+							sx*ty * f[x0*n + y1];   // Top-left corner weight
 
-				var val = 	sx*sy * f[x0*n + y0] +  // Bottom-left weight
-							tx*sy * f[x1*n + y0] +  // Bottom-right weight
-							tx*ty * f[x1*n + y1] +  // Top-right weight
-							sx*ty * f[x0*n + y1];   // Top-left weight
-
-				return val;
+				return val; // Return smoothly interpolated value
 			}
 
+			/**
+			 * Calculate average horizontal velocity (u) at cell center
+			 * Averages the 4 surrounding u values (stored on cell edges)
+			 * 
+			 *     u[i,j]   u[i+1,j]
+			 *        |       |
+			 *        ├───★───┤    ★ = cell center (i,j)
+			 *        |       |
+			 *   u[i,j-1]  u[i+1,j-1]
+			 * 
+			 * @param {number} i - Grid column index
+			 * @param {number} j - Grid row index
+			 * @returns {number} - Average horizontal velocity at cell center
+			 */
 			avgU (i,j){
 				var n = this.numY;
+				// Average 4 u-values around the cell center
 				var u = (this.u[i*n + j -1] + this.u[i*n + j] + 
 						this.u[(i+1)*n + j -1] + this.u[(i+1) *n + j]	) * 0.25;
 				return u;
 			}
 
+			/**
+			 * Calculate average vertical velocity (v) at cell center
+			 * Averages the 4 surrounding v values (stored on cell edges)
+			 * 
+			 *        v[i,j+1]
+			 *            |
+			 *    v[i-1,j] ★ v[i,j]    ★ = cell center (i,j)
+			 *            |
+			 *        v[i-1,j+1]
+			 * 
+			 * @param {number} i - Grid column index
+			 * @param {number} j - Grid row index
+			 * @returns {number} - Average vertical velocity at cell center
+			 */
 			avgV(i, j) {
 			var n = this.numY;
+			// Average 4 v-values around the cell center
 			var v = (this.v[(i-1)*n + j] + this.v[i*n + j] +
 				this.v[(i-1)*n + j+1] + this.v[i*n + j+1]) * 0.25;
 			return v;

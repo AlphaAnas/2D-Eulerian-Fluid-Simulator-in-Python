@@ -52,66 +52,111 @@
 
 
 	<script>
-
+		// ═══════════════════════════════════════════════════════════════
+		// CANVAS SETUP - Initialize drawing surface
+		// ═══════════════════════════════════════════════════════════════
 		var canvas = document.getElementById("myCanvas");
-		var c = canvas.getContext("2d");
-		canvas.width = window.innerWidth - 20;
-		canvas.height = window.innerHeight - 100;
+		var c = canvas.getContext("2d"); // Get 2D drawing context
+		canvas.width = window.innerWidth - 20;  // Set canvas width to almost full window
+		canvas.height = window.innerHeight - 100; // Leave space for buttons
 
-		canvas.focus();
+		canvas.focus(); // Allow keyboard input
 
-		var simHeight = 1.1;
-		var cScale = canvas.height / simHeight;
-		var simWidth = canvas.width / cScale;
+		// ═══════════════════════════════════════════════════════════════
+		// SIMULATION COORDINATE SYSTEM
+		// ═══════════════════════════════════════════════════════════════
+		var simHeight = 1.1; // Simulation world height (in meters)
+		var cScale = canvas.height / simHeight; // Pixels per meter conversion factor
+		var simWidth = canvas.width / cScale; // Simulation world width (in meters)
 
-		var U_FIELD = 0;
-		var V_FIELD = 1;
-		var S_FIELD = 2;
+		// ═══════════════════════════════════════════════════════════════
+		// FIELD TYPE CONSTANTS - Identify which data array to access
+		// ═══════════════════════════════════════════════════════════════
+		var U_FIELD = 0; // Horizontal velocity field
+		var V_FIELD = 1; // Vertical velocity field
+		var S_FIELD = 2; // Smoke/marker field
 
-		var cnt = 0;
+		var cnt = 0; // Counter for debugging/tracking
 
+		// ═══════════════════════════════════════════════════════════════
+		// COORDINATE CONVERSION FUNCTIONS
+		// Convert between simulation coordinates and canvas pixel coordinates
+		// ═══════════════════════════════════════════════════════════════
+		
+		// Convert simulation X coordinate to canvas pixel X
 		function cX(x) {
 			return x * cScale;
 		}
 
+		// Convert simulation Y coordinate to canvas pixel Y
+		// (Flips Y-axis because canvas Y increases downward but simulation Y increases upward)
 		function cY(y) {
 			return canvas.height - y * cScale;
 		}
 
+		// ═══════════════════════════════════════════════════════════════
+		// FLUID SIMULATION CLASS - The heart of the physics engine
+		// ═══════════════════════════════════════════════════════════════
 		// ----------------- start of simulator ------------------------------
 
 		class Fluid {
+			/**
+			 * Creates a new fluid simulation grid
+			 * @param {number} density - Fluid density (kg/m³), typically 1000 for water
+			 * @param {number} numX - Number of grid cells horizontally
+			 * @param {number} numY - Number of grid cells vertically
+			 * @param {number} h - Cell size (grid spacing in meters)
+			 */
 			constructor(density, numX, numY, h) {
-				this.density = density;
-				this.numX = numX + 2;
-				this.numY = numY + 2;
-				this.h = h;
-				this.numCells = this.numX * this.numY;
-				this.u = new Float32Array(this.numCells); // x-velocity
-				this.v = new Float32Array(this.numCells); // y-velocity
-				this.newU = new Float32Array(this.numCells);
-				this.newV = new Float32Array(this.numCells);
-				this.p = new Float32Array(this.numCells); // pressure
-				this.s = new Float32Array(this.numCells); // smoke density
-				this.m = new Float32Array(this.numCells); // marker field
-				this.newM = new Float32Array(this.numCells);
-				this.m.fill(1.0); // initialize as fluid
-				var num = numX * numY; // number of fluid cells
+				this.density = density; // Fluid density (affects pressure calculations)
+				this.numX = numX + 2; // Add 2 boundary cells (left + right)
+				this.numY = numY + 2; // Add 2 boundary cells (top + bottom)
+				this.h = h; // Grid cell size (spacing between cells)
+				this.numCells = this.numX * this.numY; // Total number of cells in grid
+				
+				// ═══════════════════════════════════════════════════════════════
+				// VELOCITY FIELDS - Store fluid motion
+				// ═══════════════════════════════════════════════════════════════
+				this.u = new Float32Array(this.numCells); // x-velocity (horizontal component)
+				this.v = new Float32Array(this.numCells); // y-velocity (vertical component)
+				this.newU = new Float32Array(this.numCells); // Temporary buffer for advection
+				this.newV = new Float32Array(this.numCells); // Temporary buffer for advection
+				
+				// ═══════════════════════════════════════════════════════════════
+				// SCALAR FIELDS - Store pressure, solid/fluid markers, and smoke
+				// ═══════════════════════════════════════════════════════════════
+				this.p = new Float32Array(this.numCells); // pressure field
+				this.s = new Float32Array(this.numCells); // solid field (0.0=solid/wall, 1.0=fluid)
+				this.m = new Float32Array(this.numCells); // marker field (smoke/dye density)
+				this.newM = new Float32Array(this.numCells); // Temporary buffer for smoke advection
+				this.m.fill(1.0); // initialize as fluid (all cells start with smoke)
+				var num = numX * numY; // number of fluid cells (without boundary)
 
 			}
 
+			/**
+			 * STEP 1: Apply gravity to vertical velocity
+			 * Simulates gravitational acceleration pulling fluid downward
+			 * @param {number} dt - Time step (seconds)
+			 * @param {number} gravity - Gravitational acceleration (m/s²), typically -9.81
+			 */
 			integrate(dt, gravity) {
-				var n = this.numY;
+				var n = this.numY; // Store numY for efficient array indexing
+				// Loop through all interior cells (skip boundaries)
 				for (var i = 1; i < this.numX; i++) {
 					for (var j = 1; j < this.numY - 1; j++) {
+						// Only apply gravity if current cell AND cell below are both fluid (not solid)
 						if (this.s[i * n + j] != 0.0 && this.s[i * n + j - 1] != 0.0) { // if there is smoke here and below
-							this.v[i * n + j] += gravity * dt; // apply gravity
+							this.v[i * n + j] += gravity * dt; // apply gravity (v += g * dt)
 						}
 					}
 				}
 			}
 
 			/**
+			 * ═══════════════════════════════════════════════════════════════
+			 * STEP 2: SOLVE INCOMPRESSIBILITY - The Core Physics Engine!
+			 * ═══════════════════════════════════════════════════════════════
 			 * Enforce incompressibility of the velocity field by solving the pressure Poisson equation
 			 * and projecting the velocity to be divergence-free.
 			 *
@@ -123,6 +168,8 @@
 			 * as part of the procedure. The operation updates the simulator's internal velocity and
 			 * pressure arrays in-place to enforce mass conservation.
 			 *
+			 * KEY CONCEPT: Real fluids can't be compressed - this ensures mass conservation
+			 * 
 			 * @param {number} numIters - Number of iterations to run the linear solver. More iterations
 			 *                             yield a more accurate projection at higher computational cost.
 			 * @param {number} dt       - Simulation time step (seconds). Used to scale pressure-gradient
@@ -131,16 +178,19 @@
 			 */
 			solveIncompressibility(numIters, dt) {
 
-				var n = this.numY;
+				var n = this.numY; // Store for efficient indexing
 				// cp = (rho * cellVolume) / dt, used to scale the discrete divergence into the pressure RHS
-				var cp = this.density * this.j / dt;
+				var cp = this.density * this.h / dt; // Pressure scaling factor
 
-
+				// ═══════════════════════════════════════════════════════════════
+				// ITERATIVE SOLVER - Repeat to converge to correct pressure field
+				// ═══════════════════════════════════════════════════════════════
 				for (var iter = 0; iter < numIters; iter++) {
+					// Loop through interior cells only (boundaries handled separately)
 					for (var i = 1; i < this.numX - 1; i++) { // iterating till the 2nd last cell because of boundary conditions
 						for (var j = 1; j < this.numY - 1; j++) {
 
-
+							// Skip solid cells (walls/obstacles) - only process fluid cells
 							if (this.s[i * n + j] == 0.0)
 								continue; // skip if not fluid cell
 
@@ -189,12 +239,102 @@
 					}
 				}
 			}
+			
+			
+			/*
+				Copies velocity values from inside the grid to the boundary edges.
 
+				Before:          After extrapolate:
+				[?][?][?][?]  →  [5][5][7][3]
+				[5][7][3][2]     [5][7][3][2]
+				[4][6][8][1]     [4][6][8][1]
+			*/
 			extrapolate(){
 				var n = this.numY;
+			
 				for (var i = 0; i < this.numX; i++){
+					// Bottom edge: copy from row 1 to row 0
 					this.u[i*n + 0] = this.u[i*n + 1];
-					
+
+				}
+
+				for(var j = 0 ; j < this.numY; j++){
+					// Left edge: copy from column 1 to column 0
+					this.v[0*n + j] = this.v[1*n + j]; 
+					// Right edge: copy from second-to-last to last column
+					this.v[(this.numX-1)*n + j] = this.v[(this.numX-2)*n + j]; 
 				}
 			}
+
+			/*
+				Gets a smooth value at ANY position (not just grid corners) by blending nearby values.
+			Grid points:     What if we want value HERE? ★
+			[10]----[20]     
+			|       |      			 [10]----[20]
+			|       |        		  |   ★   |
+			[30]----[40]             [30]----[40]
+			
+				*/
+			sampleField(x, y, field){
+				var n = this.numY;
+				var h = this.h;
+				var h1 = 1.0 / h; // inverse cell size
+				var h2 = 0.5 * h; // half cell size
+
+					//1. Clamp position to grid bounds
+				x = Math.max(Math.min(x, this.numX * h ), h); 
+				y = Math.max(Math.min(y, this.numY * h ), h);
+
+
+				var dx = 0.0;
+				var dy = 0.0;
+
+				var f; 
+					//2. Choose which array to sample
+				switch (field){
+						case U_FIELD: f = this.u; dy = h2; break;  // Horizontal velocity
+						case V_FIELD: f = this.v; dx = h2; break;  // Vertical velocity
+						case S_FIELD: f = this.m; dx = h2; dy = h2; break; // Smoke
+				}
+
+
+				//3. Find the 4 surrounding grid cells
+				//  x=2.7, then x0=2 and x1=3
+				var x0 = Math.min(Math.floor((x - dx) * h1), this.numX - 1);
+				var x1 = Math.min(x0 + 1, this.numX - 1);
+				
+				
+				var y0 = Math.min(Math.floor((y - dy) * h1), this.numY - 1);
+				var y1 = Math.min(y0 + 1, this.numY - 1);
+				
+				//4. Calculate blend weights
+
+				var tx = ((x - dx) - x0*h) * h1;  // How far right (0 to 1)
+				var ty = ((y - dy) - y0*h) * h1;  // How far up (0 to 1)
+
+				var sx = 1.0 - tx;  // How far left
+				var sy = 1.0 - ty;  // How far down
+
+
+				var val = 	sx*sy * f[x0*n + y0] +  // Bottom-left weight
+							tx*sy * f[x1*n + y0] +  // Bottom-right weight
+							tx*ty * f[x1*n + y1] +  // Top-right weight
+							sx*ty * f[x0*n + y1];   // Top-left weight
+
+				return val;
+			}
+
+			avgU (i,j){
+				var n = this.numY;
+				var u = (this.u[i*n + j -1] + this.u[i*n + j] + 
+						this.u[(i+1)*n + j -1] + this.u[(i+1) *n + j]	) * 0.25;
+				return u;
+			}
+
+			avgV(i, j) {
+			var n = this.numY;
+			var v = (this.v[(i-1)*n + j] + this.v[i*n + j] +
+				this.v[(i-1)*n + j+1] + this.v[i*n + j+1]) * 0.25;
+			return v;
+		}
 		}
